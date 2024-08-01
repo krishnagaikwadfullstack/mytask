@@ -1,0 +1,94 @@
+use GuzzleHttp\Client;
+public function getProducts($shop) {
+        try {
+            $shopUrl = $shop->store_name;
+            $app_settings = AppSettings::where('id', 1)->first();
+            $apiKey = $app_settings->api_key;
+            $access_token = $shop->access_token;
+            // dd($client);
+
+            $access_code = 'e0bc56f88525d424eb3607dc0dce076a';//'1afa779ce51553cb981e8eed3be2772d'
+            $endpoint = "https://$shopUrl/admin/api/2024-07/graphql.json";
+            $endpoint = "https://$shopUrl/api/2024-04/graphql";
+            $client = new Client([
+               'base_uri' => $endpoint,
+               'headers' => [
+                   // 'X-Shopify-Access-Token' => $access_token,
+                   'X-Shopify-Storefront-Access-Token' => $access_code,
+                   'Content-Type' => 'application/json',
+               ],
+            ]);
+
+            // Create store front access token using graphQl
+            $mutation = 'mutation StorefrontAccessTokenCreate($input: StorefrontAccessTokenInput!) { storefrontAccessTokenCreate(input: $input) { userErrors { field message } shop { id } storefrontAccessToken { accessScopes { handle } accessToken title } } }';
+            $variables = [
+                'input' => [
+                    'title' => 'Krishna Storefront Access Token',
+                ],
+            ];
+
+            # get shopify product using storefront access token
+            $query = '
+            query getProducts($first: Int) {
+              products(first: $first) {
+                edges {
+                  cursor
+                  node {
+                    id
+                    title
+                    description
+                  }
+                }
+              }
+            }
+            ';
+
+            $variables = [
+                'first' => 10
+            ];   
+
+            // Send GraphQL POST request
+            $response = $client->request('POST', '', [
+                'json' => [
+                    'query' => $query,
+                    'variables'=> $variables,
+                ],
+            ]);
+
+             // $client = new Client();
+
+            // $response = $client->post($endpoint, [
+            //     'headers' => [
+            //         'Content-Type' => 'application/json',
+            //         'X-Shopify-Storefront-Access-Token' => $store_front_code,
+            //     ],
+            //     'json' => [
+            //         'query' => $query,
+            //         'variables' => $variables
+            //     ],
+            // ]);
+
+
+            // Send GraphQL POST request with mutation
+            // $response = $client->request('POST', '', [
+            //     'json' => [
+            //         'query' => $query,
+            //         'variables' => $variables,
+            //     ],
+            // ]);
+
+            // Send GraphQL POST request
+            // $response = $client->post('', [
+            //     'body' => $query,
+            // ]);
+
+            // $response = $client->post('storefront_access_tokens',$variables);
+
+            $result = json_decode($response->getBody()->getContents(), true);
+            dd($result,$response);
+            return response()->json($data);
+        } catch (\Exception $e) {
+            dd($e);
+            return response()->json(['error' => $e->getMessage()], 500);
+        }
+    }
