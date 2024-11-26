@@ -1,0 +1,73 @@
+//start get access token by email
+        getAccessToken: async (_, { email }) => {
+            if (!email) {
+                throw new Error('Email is required');
+            }
+ 
+            const mulitpassify = new Multipassify(process.env.SHOPIFY_MULTIPASS_SECRET_KEY);
+            const customerData = { email: email };
+ 
+            const token = mulitpassify.encode(customerData);
+            const storefrontClient = require('../../shopify/storeClient');
+ 
+            const tokenResult = await storefrontClient.query({
+                data: `
+                mutation {
+                    customerAccessTokenCreateWithMultipass(multipassToken: "${token}") {
+                        customerAccessToken {
+                            accessToken
+                            expiresAt
+                        }
+                        customerUserErrors {
+                            code
+                            field
+                            message
+                        }
+                    }
+                }
+                `
+            });
+            if (!tokenResult.body.data.customerAccessTokenCreateWithMultipass.customerAccessToken) {
+                if (tokenResult.body.data.customerAccessTokenCreateWithMultipass.customerUserErrors[0]) {
+                    throw new Error(tokenResult.body.data.customerAccessTokenCreateWithMultipass.customerUserErrors[0].message);
+                } else {
+                    throw new Error("Failed To Multipass login");
+                }
+            }
+            return tokenResult.body.data.customerAccessTokenCreateWithMultipass.customerAccessToken;
+ 
+        },
+        //end get access token by email
+
+
+const mulitpassify = new Multipassify('shopifymultipasstoken');
+    const customerData = { email: "youremail" };
+ 
+    const token = mulitpassify.encode(customerData);
+    const storefrontClient = require('../shopify/storeClient');
+ 
+    const tokenResult = await storefrontClient.query({
+      data: `
+                mutation {
+                    customerAccessTokenCreateWithMultipass(multipassToken: "${token}") {
+                        customerAccessToken {
+                            accessToken
+                            expiresAt
+                        }
+                        customerUserErrors {
+                            code
+                            field
+                            message
+                        }
+                    }
+                }
+                `
+    });
+    if (!tokenResult.body.data.customerAccessTokenCreateWithMultipass.customerAccessToken) {
+      if (tokenResult.body.data.customerAccessTokenCreateWithMultipass.customerUserErrors[0]) {
+        throw new Error(tokenResult.body.data.customerAccessTokenCreateWithMultipass.customerUserErrors[0].message);
+      } else {
+        throw new Error("Failed To Multipass login");
+      }
+    }
+    console.log("=======>", tokenResult.body.data.customerAccessTokenCreateWithMultipass.customerAccessToken);
