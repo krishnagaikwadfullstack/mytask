@@ -1,0 +1,524 @@
+<?php
+
+namespace App\Http\Controllers;
+
+use Illuminate\Http\Request;
+use Carbon\Carbon;
+
+class ShopifyController extends Controller
+{
+    protected $shopifyDomain;
+    protected $storefrontAccessToken;
+    private $encryption_key;
+    private $signature_key;
+
+    public function __construct()
+    {
+        // Set your Shopify store's domain and Storefront access token
+        $this->shopifyDomain = 'a57209-3.myshopify.com'; // Replace with your store domain
+        $this->storefrontAccessToken = 'storefrontaccesstoke'; // Replace with your Storefront access token
+        $this->adminAccessToken = 'adminaccestoken'; // Replace with your adminAccessToken access token
+        // $this->adminAccessToken = ''; // Replace with your adminAccessToken access token
+    }
+    private function makeGraphQLRequestWithCurl($shopifyDomain, $accessToken, $body)
+    {
+        // Define the Shopify GraphQL API endpoint
+        $url = "https://a57209-3.myshopify.com/api/2024-01/graphql.json";
+
+        // Initialize cURL session
+        $ch = curl_init();
+
+        // Set cURL options
+        curl_setopt($ch, CURLOPT_URL, $url);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);  // Return response as a string instead of outputting directly
+        curl_setopt($ch, CURLOPT_POST, true);  // Send a POST request
+        curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($body));  // Send the query and variables as JSON
+
+        // Set the request headers
+        curl_setopt($ch, CURLOPT_HTTPHEADER, [
+            'Content-Type: application/json',  // Specify the content type as JSON
+            'X-Shopify-Storefront-Access-Token: ' . $this->storefrontAccessToken,  // Set the Admin API access token
+        ]);
+
+        // Execute the cURL request and store the response
+        $response = curl_exec($ch);
+        dd($response);
+        // Check for cURL errors
+        if(curl_errno($ch)) {
+            // Log the error if the cURL request fails
+            \Log::error('cURL error:', ['error' => curl_error($ch)]);
+            curl_close($ch);  // Close the cURL session
+            return null;
+        }
+
+        // Close the cURL session
+        curl_close($ch);
+
+        // Decode the JSON response
+        $decodedResponse = json_decode($response, true);
+
+        // Check for errors in the Shopify GraphQL response
+        if (isset($decodedResponse['errors'])) {
+            // Log Shopify-specific errors
+            \Log::error('Shopify GraphQL errors:', ['errors' => $decodedResponse['errors']]);
+            return null;
+        }
+
+        // Return the decoded response
+        return $decodedResponse;
+    }
+
+    private function generateMultipassToken($customerEmail)
+    {
+        // Step 1: Shopify Multipass secret (you should have this from your Shopify store settings)
+        $multipassSecret = 'd170882490cc2aa6d220e806443bcfbb'; // Replace with your actual Multipass secret
+
+        // Step 2: Create the data that will be included in the token
+        $data = [
+            'email' => $customerEmail, // Include only the email (you can add more customer data if needed)
+        ];
+
+        // Step 3: Encode the data into a base64 URL-safe string
+        $encodedData = base64_encode(json_encode($data));
+
+        // Step 4: Generate the HMAC hash using your Multipass secret
+        $hash = hash_hmac('sha256', $encodedData, $multipassSecret, true);
+
+        // Step 5: Combine the encoded data with the hash
+        $multipassToken = $encodedData . '.' . base64_encode($hash);
+
+        // Return the Multipass token
+        return $multipassToken;
+    }
+    public function generate_token($customer_data_hash) {
+       // Store the current time in ISO8601 format.
+       // The token will only be valid for a small timeframe around this timestamp.
+       $customer_data_hash["created_at"] = date("c");
+
+       // Serialize the customer data to JSON and encrypt it
+       $ciphertext = $this->encrypt(json_encode($customer_data_hash));
+
+       // Create a signature (message authentication code) of the ciphertext
+       // and encode everything using URL-safe Base64 (RFC 4648)
+       return strtr(base64_encode($ciphertext . $this->sign($ciphertext)), '+/', '-_');
+   }
+
+   private function encrypt($plaintext) {
+       // Use a random IV
+       $iv = openssl_random_pseudo_bytes(16);
+
+       // Use IV as first block of ciphertext
+       return $iv . openssl_encrypt($plaintext, "AES-128-CBC", $this->encryption_key, OPENSSL_RAW_DATA, $iv);
+   }
+
+   private function sign($data) {
+       return hash_hmac("sha256", $data, $this->signature_key, true);
+   }
+   private function customerAccessTokenCreate ($email)
+   {
+        // Step 1: Define your Multipass secret (you should retrieve this from Shopify settings)
+        $multipassSecret = 'd170882490cc2aa6d220e806443bcfbb'; // Replace with your actual Multipass secret
+
+        // Step 2: Create the customer data (we're just using the email here, you can add more data if necessary)
+        $currentTimestamp = Carbon::now()->toIso8601String();
+        // $customerData = ['email' => $email,'created_at'=>$currentTimestamp];
+        $key_material = hash("sha256", $multipassSecret, true);
+        $this->encryption_key = substr($key_material, 0, 16);
+        $this->signature_key = substr($key_material, 16, 16);
+
+        $customer_data = array(
+            "email" => "vidya.ghule@ideastoimpacts.com"
+        );
+        $multipassToken = $this->generate_token($customer_data);
+        // dd($reposne);
+
+           // Step 6: Define the GraphQL query to create the customer access token using the Multipass token
+           $query = '
+           mutation customerAccessTokenCreateWithMultipass($multipassToken: String!) {
+               customerAccessTokenCreateWithMultipass(multipassToken: $multipassToken) {
+                   customerAccessToken {
+                       accessToken
+                       expiresAt
+                   }
+                   customerUserErrors {
+                       field
+                       message
+                   }
+               }
+           }';
+
+           // Step 7: Prepare the request body with the multipass token as a variable
+           $variables = [
+               'multipassToken' => $multipassToken,
+           ];
+
+           $body = [
+               'query' => $query,
+               'variables' => $variables,
+           ];
+
+           // Step 8: Send the GraphQL request (using cURL or a custom function)
+           $response = $this->makeGraphQLRequestWithCurl($this->shopifyDomain, $this->storefrontAccessToken, $body);
+
+           // Step 9: Check if the access token is returned in the response
+           if (isset($response['data']['customerAccessTokenCreateWithMultipass']['customerAccessToken']['accessToken'])) {
+               // Return the customer access token if successful
+               return $response['data']['customerAccessTokenCreateWithMultipass']['customerAccessToken'];
+           }
+
+           // Step 10: Log any errors if the token creation failed
+           if (isset($response['data']['customerAccessTokenCreateWithMultipass']['customerUserErrors'])) {
+               \Log::error('Error creating customer access token:', $response['data']['customerAccessTokenCreateWithMultipass']['customerUserErrors']);
+           }
+
+           // Return null if token creation failed or errors occurred
+           return null;
+   }
+
+     public function checkCustomerActiveByEmail(Request $request)
+    {
+        $email = 'jazzeblu@gmail.com';//chelsea.sharp@outlook.com
+        // dd($email);
+        $customerAccessToken = $this->customerAccessTokenCreate('vidya.ghule@ideastoimpacts.com');
+        // $data = $this->getMarketSpecificProducts('8283478327601');
+        dd($customerAccessToken);
+        // $data = $this->getMarkets();
+        $customerId1 = $this->getCustomerIdByEmail($email);
+        // $customerId = $this->getCustomerIdByEmailStorefront($email);
+        $customerId = $this->getCustomerById('8616096170289');
+
+        //$customerId = 'gid://shopify/Customer/8591465611569';
+        dd($customerId,$customerId1);
+        if ($customerId) {
+            // Step 2: Send Account Recovery Email
+            return $this->sendAccountRecoveryEmail($customerId, $email);
+        } else {
+            return response()->json(['error' => 'Customer not found'], 404);
+        }
+        dd('admin access token');
+        $query = '
+          query {
+            customers(first: 1, query: "email:' . $email . '") {
+              edges {
+                node {
+                  id
+                  email
+                }
+              }
+            }
+          }';
+
+          $ch = curl_init();
+          curl_setopt($ch, CURLOPT_URL, "https://$this->shopifyDomain/admin/api/2023-10/graphql.json");
+          curl_setopt($ch, CURLOPT_HTTPHEADER, array(
+              "Content-Type: application/json",
+              "X-Shopify-Access-Token: $this->adminAccessToken"
+          ));
+          curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+          curl_setopt($ch, CURLOPT_POST, true);
+          curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode(array("query" => $query)));
+
+          $response = curl_exec($ch);
+
+          if (curl_errno($ch)) {
+              echo 'Error:' . curl_error($ch);
+          }
+
+          curl_close($ch);
+
+          // Parse the JSON response
+          $responseData = json_decode($response, true);
+
+          if (isset($responseData['data']['customers']['edges']) && !empty($responseData['data']['customers']['edges'])) {
+              $customer = $responseData['data']['customers']['edges'][0]['node'];
+              echo 'Customer ID: ' . $customer['id'] . ', Email: ' . $customer['email'];
+          } else {
+              echo 'Customer with the provided email does not exist.';
+          }
+          dd(44);
+
+        // GraphQL query to retrieve customer information by email
+        $query = '
+          query {
+            customers(first: 1, query: "email:' . $email . '") {
+              edges {
+                node {
+                  id
+                  email
+                }
+              }
+            }
+          }';
+
+
+        // Initialize cURL
+        $ch = curl_init('https://' . $this->shopifyDomain . '/api/2023-07/graphql.json'); // Adjust API version as needed
+
+        // Set cURL options
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_HTTPHEADER, [
+            'Content-Type: application/json',
+            'X-Shopify-Storefront-Access-Token: ' . $this->storefrontAccessToken,
+        ]);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode(['query' => $query]));
+
+        // Execute cURL request and get response
+        $response = curl_exec($ch);
+        dd($response);
+        // Check for cURL errors
+        if (curl_errno($ch)) {
+            $error_msg = curl_error($ch);
+            curl_close($ch);
+            return response()->json(['error' => $error_msg], 500);
+        }
+
+        // Close cURL session
+        curl_close($ch);
+
+        // Decode the JSON response
+        $responseBody = json_decode($response, true);
+        $customerEdges = $responseBody['data']['customers']['edges'] ?? [];
+        dd($customerEdges);
+        // Check if any customer was found
+        if (!empty($customerEdges)) {
+            $customer = $customerEdges[0]['node'];
+            // Check if the customer has any orders
+            if (!empty($customer['orders']['edges'])) {
+                return response()->json(['active' => true, 'customer' => $customer]);
+            }
+        }
+
+        return response()->json(['active' => false]);
+    }
+    private function getMarkets()
+    {
+        // GraphQL query to fetch markets
+        $query = '
+        query {
+            markets(first: 10) {
+                edges {
+                    node {
+                        id
+                        name
+                    }
+                }
+            }
+        }';
+
+        try {
+            // Make the GraphQL request
+            $response = $this->makeGraphQLRequest($this->shopifyDomain, $this->adminAccessToken, $query);
+
+            // Check if we have markets in the response
+            if (isset($response['data']['markets']['edges']) && count($response['data']['markets']['edges']) > 0) {
+                // Return the markets from the response
+                return $response['data']['markets']['edges'];
+            }
+
+            return null; // No markets found
+
+        } catch (Exception $e) {
+            // Log the error or handle it appropriately
+            error_log("Error fetching markets: " . $e->getMessage());
+            return null;
+        }
+    }
+
+    private function getMarketSpecificProducts($marketId)
+    {
+        // GraphQL query to fetch products for a specific market
+        $query = '
+        query {
+          products(first: 10, query: "market_id:' . $marketId . '") {
+            edges {
+              node {
+                id
+                title
+                variants(first: 1) {
+                  edges {
+                    node {
+                      id
+                      title
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }';
+
+        // Make the GraphQL request
+        $response = $this->makeGraphQLRequest($this->shopifyDomain, $this->adminAccessToken, $query);
+
+        // Check if we have products in the response
+        if (isset($response['data']['products']['edges']) && count($response['data']['products']['edges']) > 0) {
+            // Return the products from the response
+            return $response['data']['products']['edges'];
+        }
+
+        return null; // No products found for this market
+    }
+    private function getCustomerById($customerId)
+    {
+        // Ensure the Admin Access Token and Store Domain are set correctly in your environment
+        // $shopifyStore = env('SHOPIFY_STORE');
+        // $adminAccessToken = env('ADMIN_ACCESS_TOKEN');  // Admin Access Token to access customer data
+
+        // GraphQL query to find the customer by their customer ID
+        $query = '
+          query {
+            customer(id: "gid://shopify/Customer/' . $customerId . '") {
+              id
+              email
+              firstName
+              lastName
+              phone
+            }
+          }';
+
+        // Make the GraphQL request using the Admin Access Token
+        $response = $this->makeGraphQLRequest($this->shopifyDomain, $this->adminAccessToken, $query);
+        // dd($response);
+        // Check if the customer data is returned
+        if (isset($response['data']['customer'])) {
+            return $response['data']['customer'];  // Return customer details
+        }
+
+        return null;  // Customer not found
+    }
+    private function getCustomerIdByEmail($email)
+    {
+        // $shopifyStore = env('SHOPIFY_STORE');
+        // $adminAccessToken = env('ADMIN_ACCESS_TOKEN');
+
+        // GraphQL query to find the customer by email
+        $query = '
+          query {
+            customers(first: 1, query: "email:' . $email . '") {
+              edges {
+                node {
+                  id
+                  email
+                }
+              }
+            }
+          }';
+
+        $response = $this->makeGraphQLRequest($this->shopifyDomain, $this->adminAccessToken, $query);
+        // dd($response);
+        if (isset($response['data']['customers']['edges']) && count($response['data']['customers']['edges']) > 0) {
+            return $response['data']['customers']['edges'][0]['node']['id']; // Get the customer ID
+        }
+
+        return null; // Customer not found
+    }
+
+    private function getCustomerIdByEmailStorefront($email)
+    {
+        // Use the Storefront Access Token instead of Admin Access Token
+        // $shopifyStore = env('SHOPIFY_STORE');
+        // $storefrontAccessToken = env('STORE_FRONT_ACCESS_TOKEN');  // Your Storefront Access Token
+
+        // GraphQL query to find the customer by email
+        $query = '
+          query {
+            customers(first: 1, query: "email:' . $email . '") {
+              edges {
+                node {
+                  id
+                  email
+                }
+              }
+            }
+          }';
+
+        // Make the GraphQL request using the Storefront Access Token
+        $response = $this->makeGraphQLRequest($this->shopifyDomain, $this->storefrontAccessToken, $query);
+
+        if (isset($response['data']['customers']['edges']) && count($response['data']['customers']['edges']) > 0) {
+            return $response['data']['customers']['edges'][0]['node']['id']; // Get the customer ID
+        }
+
+        return null; // Customer not found
+    }
+
+    private function sendAccountRecoveryEmail($customerId, $email)
+    {
+        // $shopifyStore = env('SHOPIFY_STORE');
+        // $adminAccessToken = env('ADMIN_ACCESS_TOKEN');
+
+       // GraphQL mutation to send the account invite email
+        $mutation = '
+        mutation {
+            customerSendInvite(id: "' . $customerId . '") {
+                customerUserErrors {
+                    code
+                    field
+                    message
+                }
+            }
+        }';
+
+        $response = $this->makeGraphQLRequest($this->shopifyDomain, $this->adminAccessToken, $mutation);
+        dd($response);
+        if (isset($response['data']['customerSendInvite']['customerUserErrors']) && count($response['data']['customerSendInvite']['customerUserErrors']) > 0) {
+            return response()->json(['error' => 'Failed to send account recovery email.', 'details' => $response['data']['customerSendInvite']['customerUserErrors']], 500);
+        }
+
+        return response()->json(['message' => 'Account recovery email sent successfully!']);
+    }
+}
+
+// const shopifyStore = 'a57209-3.myshopify.com';
+//     const adminToken = "";
+//     const storefrontAccessToken = "";
+//     const email = 'S@tarcaz.com';
+ 
+//     const graphqlUrl = `https://${shopifyStore}/api/2024-04/graphql.json`;  // Storefront API endpoint
+ 
+//     const mutation = `
+//     mutation customerRecover($email: String!) {
+//       customerRecover(email: $email) {
+//         customerUserErrors {
+//           code
+//           field
+//           message
+//         }
+//       }
+//     }
+//   `;
+ 
+//     // Set up the request body
+//     const body = JSON.stringify({
+//       query: mutation,
+//       variables: {
+//         email: email
+//       }
+//     });
+ 
+//     try {
+//       // Make the POST request to Shopify Storefront API
+//       const response = await fetch(graphqlUrl, {
+//         method: 'POST',
+//         headers: {
+//           'Content-Type': 'application/json',
+//           'X-Shopify-Storefront-Access-Token': storefrontAccessToken  // Use Storefront Access Token
+//         },
+//         body: body
+//       });
+ 
+//       const result = await response.json();
+//       console.log(result);
+ 
+//       // Check for user errors in the response
+//       if (result.data.customerRecover.customerUserErrors.length > 0) {
+//         console.error('Errors:', result.data.customerRecover.customerUserErrors);
+//         return result.data.customerRecover.customerUserErrors;
+//       } else {
+//         console.log('Customer recovery email sent successfully.');
+//         return result;
+//       }
+//     } catch (error) {
+//       console.error('Error sending customer recover:', error);
+//     }
